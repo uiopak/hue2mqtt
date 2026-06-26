@@ -1,0 +1,20 @@
+bridge:
+  name: "hue2mqtt"
+  mac: "AA:BB:CC:DD:EE:FF"   # Used for bridge ID generation. Can be any fake MAC.
+  http_port: 80
+  link_button: true           # When true, new app pairing is accepted. Set to false after pairing.
+  log_level: "info"           # Log levels: "info" (startup/errors only), "simple" (request summaries), "verbose" (full dumps)
+
+
+mqtt:
+  server: "192.168.1.100"        # Change to your MQTT broker IP
+  port: 1883
+  username: ""                # optional
+  password: ""                # optional
+
+lights:
+  - friendly_name: "example_light_1"        # Zigbee2MQTT friendly name
+    capabilities: "extended_color"      # See capability types: on_off, dimmable, color_temperature, color, extended_color
+
+  - friendly_name: "example_light_2"
+    capabilities: "extended_color"
