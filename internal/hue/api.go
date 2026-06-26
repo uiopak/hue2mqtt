@@ -261,8 +261,9 @@ func (s *Server) handleLightsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := s.cfgManager.GetConfig()
+	lightsList := s.mqttClient.GetLights()
 	lights := make(map[string]HueLight)
-	for _, l := range cfg.Lights {
+	for _, l := range lightsList {
 		mstate, _ := s.mqttClient.GetLightState(l.FriendlyName)
 		lights[l.ID] = BuildHueLight(l, &mstate, cfg.Bridge.MAC)
 	}
@@ -276,11 +277,12 @@ func (s *Server) handleLightGet(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	cfg := s.cfgManager.GetConfig()
+	lightsList := s.mqttClient.GetLights()
 
 	var matchedLight *config.LightConfig
-	for i := range cfg.Lights {
-		if cfg.Lights[i].ID == id {
-			matchedLight = &cfg.Lights[i]
+	for i := range lightsList {
+		if lightsList[i].ID == id {
+			matchedLight = &lightsList[i]
 			break
 		}
 	}
@@ -321,9 +323,10 @@ func (s *Server) handleFullState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := s.cfgManager.GetConfig()
+	lightsList := s.mqttClient.GetLights()
 
 	lights := make(map[string]HueLight)
-	for _, l := range cfg.Lights {
+	for _, l := range lightsList {
 		mstate, _ := s.mqttClient.GetLightState(l.FriendlyName)
 		lights[l.ID] = BuildHueLight(l, &mstate, cfg.Bridge.MAC)
 	}
@@ -358,12 +361,12 @@ func (s *Server) handleLightStatePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	cfg := s.cfgManager.GetConfig()
+	lightsList := s.mqttClient.GetLights()
 
 	var matchedLight *config.LightConfig
-	for i := range cfg.Lights {
-		if cfg.Lights[i].ID == id {
-			matchedLight = &cfg.Lights[i]
+	for i := range lightsList {
+		if lightsList[i].ID == id {
+			matchedLight = &lightsList[i]
 			break
 		}
 	}

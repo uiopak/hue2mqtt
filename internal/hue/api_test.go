@@ -112,6 +112,14 @@ lights:
 	}
 
 	mqttClient := mqtt.NewClient(cfgMgr)
+	mqttClient.SetDiscoveredLights([]config.LightConfig{
+		{
+			ID:           "1",
+			FriendlyName: "bedroom_light_1",
+			Capabilities: "extended_color",
+			Name:         "bedroom_light_1",
+		},
+	})
 	mqttClient.SetLightState("bedroom_light_1", mqtt.LightState{
 		On:         true,
 		Brightness: 100,

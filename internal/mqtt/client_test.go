@@ -185,3 +185,169 @@ lights:
 		t.Errorf("expected Missing Bulb to remain unreachable")
 	}
 }
+
+func TestCapabilityAutoDetection(t *testing.T) {
+	tempFile, err := os.CreateTemp("", "config_test_*.yaml")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFile.Name())
+
+	// Empty overrides to test pure auto-discovery
+	configYaml := []byte(`
+bridge:
+  name: "test-bridge"
+  mac: "11:22:33:44:55:66"
+mqtt:
+  server: "localhost"
+`)
+	if _, err := tempFile.Write(configYaml); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	tempFile.Close()
+
+	cfgMgr, err := config.Load(tempFile.Name())
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	client := NewClient(cfgMgr)
+
+	// Mock payload with multiple different lights
+	devicesPayload := `[
+		{
+			"friendly_name": "On Off Plug",
+			"ieee_address": "0x0000000000000001",
+			"type": "Router",
+			"definition": {
+				"model": "PlugModel",
+				"vendor": "VendorA",
+				"description": "On/Off plug",
+				"exposes": [
+					{
+						"type": "light",
+						"features": [
+							{"name": "state", "property": "state", "type": "binary"}
+						]
+					}
+				]
+			},
+			"supported": true
+		},
+		{
+			"friendly_name": "Dimmable Bulb",
+			"ieee_address": "0x0000000000000002",
+			"type": "Router",
+			"definition": {
+				"model": "DimmableModel",
+				"vendor": "VendorA",
+				"description": "Dimmable bulb",
+				"exposes": [
+					{
+						"type": "light",
+						"features": [
+							{"name": "state", "property": "state", "type": "binary"},
+							{"name": "brightness", "property": "brightness", "type": "numeric"}
+						]
+					}
+				]
+			},
+			"supported": true
+		},
+		{
+			"friendly_name": "CT Bulb",
+			"ieee_address": "0x0000000000000003",
+			"type": "Router",
+			"definition": {
+				"model": "CTModel",
+				"vendor": "VendorA",
+				"description": "Color temperature bulb",
+				"exposes": [
+					{
+						"type": "light",
+						"features": [
+							{"name": "state", "property": "state", "type": "binary"},
+							{"name": "brightness", "property": "brightness", "type": "numeric"},
+							{"name": "color_temp", "property": "color_temp", "type": "numeric"}
+						]
+					}
+				]
+			},
+			"supported": true
+		},
+		{
+			"friendly_name": "Color Bulb",
+			"ieee_address": "0x0000000000000004",
+			"type": "Router",
+			"definition": {
+				"model": "ColorModel",
+				"vendor": "VendorA",
+				"description": "Color bulb",
+				"exposes": [
+					{
+						"type": "light",
+						"features": [
+							{"name": "state", "property": "state", "type": "binary"},
+							{"name": "brightness", "property": "brightness", "type": "numeric"},
+							{"name": "color_xy", "property": "color", "type": "composite"}
+						]
+					}
+				]
+			},
+			"supported": true
+		},
+		{
+			"friendly_name": "Extended Color Bulb",
+			"ieee_address": "0x0000000000000005",
+			"type": "Router",
+			"definition": {
+				"model": "ExtendedColorModel",
+				"vendor": "VendorA",
+				"description": "Extended color bulb",
+				"exposes": [
+					{
+						"type": "light",
+						"features": [
+							{"name": "state", "property": "state", "type": "binary"},
+							{"name": "brightness", "property": "brightness", "type": "numeric"},
+							{"name": "color_temp", "property": "color_temp", "type": "numeric"},
+							{"name": "color_xy", "property": "color", "type": "composite"}
+						]
+					}
+				]
+			},
+			"supported": true
+		}
+	]`
+
+	msg := &mockMessage{
+		topic:   "zigbee2mqtt/bridge/devices",
+		payload: []byte(devicesPayload),
+	}
+
+	client.handleBridgeDevices(nil, msg)
+
+	discovered := client.GetLights()
+	if len(discovered) != 5 {
+		t.Fatalf("expected 5 discovered lights, got %d", len(discovered))
+	}
+
+	expectedTypes := map[string]string{
+		"On Off Plug":         "on_off",
+		"Dimmable Bulb":       "dimmable",
+		"CT Bulb":             "color_temperature",
+		"Color Bulb":          "color",
+		"Extended Color Bulb": "extended_color",
+	}
+
+	for _, l := range discovered {
+		expected, exists := expectedTypes[l.FriendlyName]
+		if !exists {
+			t.Errorf("unexpected discovered light: %s", l.FriendlyName)
+			continue
+		}
+		if l.Capabilities != expected {
+			t.Errorf("expected capability %q for light %s, got %q", expected, l.FriendlyName, l.Capabilities)
+		}
+	}
+}

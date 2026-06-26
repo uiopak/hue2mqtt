@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -16,7 +15,7 @@ import (
 type Config struct {
 	Bridge BridgeConfig  `yaml:"bridge"`
 	MQTT   MQTTConfig    `yaml:"mqtt"`
-	Lights []LightConfig `yaml:"lights"`
+	Lights []LightConfig `yaml:"lights,omitempty"`
 }
 
 type BridgeConfig struct {
@@ -37,7 +36,8 @@ type MQTTConfig struct {
 type LightConfig struct {
 	ID           string `yaml:"-"`
 	FriendlyName string `yaml:"friendly_name"`
-	Capabilities string `yaml:"capabilities"`
+	Capabilities string `yaml:"capabilities,omitempty"`
+	Name         string `yaml:"name,omitempty"`
 }
 
 type Manager struct {
@@ -103,6 +103,16 @@ func (m *Manager) readAndValidate() (*Config, error) {
 		return nil, fmt.Errorf("failed to parse yaml: %w", err)
 	}
 
+	// Look for local override config (e.g. config.local.yaml)
+	ext := filepath.Ext(m.filePath)
+	localPath := strings.TrimSuffix(m.filePath, ext) + ".local" + ext
+	if localData, err := os.ReadFile(localPath); err == nil {
+		slog.Info("Loading local configuration overrides", "path", localPath)
+		if err := yaml.Unmarshal(localData, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse local yaml: %w", err)
+		}
+	}
+
 	// Validate Bridge
 	if cfg.Bridge.MAC == "" {
 		return nil, fmt.Errorf("bridge MAC is required")
@@ -136,25 +146,26 @@ func (m *Manager) readAndValidate() (*Config, error) {
 		cfg.MQTT.Port = 1883 // default
 	}
 
-	// Validate Lights
+	// Validate Lights (Overrides)
 	friendlyNames := make(map[string]bool)
 	for i := range cfg.Lights {
-		cfg.Lights[i].ID = strconv.Itoa(i + 1)
 		l := &cfg.Lights[i]
 
 		if l.FriendlyName == "" {
-			return nil, fmt.Errorf("light at index %d is missing friendly_name", i)
+			return nil, fmt.Errorf("light override at index %d is missing friendly_name", i)
 		}
 		if friendlyNames[l.FriendlyName] {
-			return nil, fmt.Errorf("duplicate light friendly_name: %s", l.FriendlyName)
+			return nil, fmt.Errorf("duplicate light friendly_name in overrides: %s", l.FriendlyName)
 		}
 		friendlyNames[l.FriendlyName] = true
 
-		switch l.Capabilities {
-		case "on_off", "dimmable", "color_temperature", "color", "extended_color":
-			// valid
-		default:
-			return nil, fmt.Errorf("light %s has invalid capability: %s", l.FriendlyName, l.Capabilities)
+		if l.Capabilities != "" {
+			switch l.Capabilities {
+			case "on_off", "dimmable", "color_temperature", "color", "extended_color":
+				// valid
+			default:
+				return nil, fmt.Errorf("light override %s has invalid capability: %s", l.FriendlyName, l.Capabilities)
+			}
 		}
 	}
 
@@ -196,7 +207,9 @@ func (m *Manager) WatchForChanges() {
 				continue
 			}
 
-			if eventAbsPath == absPath {
+			ext := filepath.Ext(absPath)
+			localPath := strings.TrimSuffix(absPath, ext) + ".local" + ext
+			if eventAbsPath == absPath || eventAbsPath == localPath {
 				if event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
 					slog.Info("Config file modification detected, reloading...")
 					newCfg, err := m.readAndValidate()

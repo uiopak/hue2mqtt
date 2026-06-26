@@ -95,3 +95,52 @@ lights:
 		t.Errorf("expected error loading invalid config, got nil")
 	}
 }
+
+func TestLocalConfigOverride(t *testing.T) {
+	tempFile, err := os.CreateTemp("", "config_test_*.yaml")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFile.Name())
+
+	baseYaml := []byte(`
+bridge:
+  name: "base-bridge"
+  mac: "11:22:33:44:55:66"
+  http_port: 8080
+mqtt:
+  server: "localhost"
+`)
+	if _, err := tempFile.Write(baseYaml); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+	tempFile.Close()
+
+	localPath := tempFile.Name()[:len(tempFile.Name())-5] + ".local.yaml"
+	localYaml := []byte(`
+bridge:
+  name: "override-bridge"
+mqtt:
+  server: "192.168.1.15"
+`)
+	if err := os.WriteFile(localPath, localYaml, 0644); err != nil {
+		t.Fatalf("failed to write local file: %v", err)
+	}
+	defer os.Remove(localPath)
+
+	mgr, err := Load(tempFile.Name())
+	if err != nil {
+		t.Errorf("unexpected error loading config with local override: %v", err)
+	}
+
+	cfg := mgr.GetConfig()
+	if cfg.Bridge.Name != "override-bridge" {
+		t.Errorf("expected bridge name override-bridge, got %s", cfg.Bridge.Name)
+	}
+	if cfg.Bridge.HTTPPort != 8080 {
+		t.Errorf("expected base HTTP port 8080 to be preserved, got %d", cfg.Bridge.HTTPPort)
+	}
+	if cfg.MQTT.Server != "192.168.1.15" {
+		t.Errorf("expected MQTT server 192.168.1.15, got %s", cfg.MQTT.Server)
+	}
+}

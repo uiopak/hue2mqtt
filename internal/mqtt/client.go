@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,14 +25,26 @@ type LightState struct {
 	Reachable  bool
 }
 
+type Z2MFeature struct {
+	Name     string `json:"name"`
+	Property string `json:"property"`
+	Type     string `json:"type"`
+}
+
+type Z2MExpose struct {
+	Type     string       `json:"type"`
+	Features []Z2MFeature `json:"features"`
+}
+
 type Z2MDevice struct {
 	FriendlyName string `json:"friendly_name"`
 	IEEEAddress  string `json:"ieee_address"`
 	Type         string `json:"type"`
 	Definition   *struct {
-		Model       string `json:"model"`
-		Vendor      string `json:"vendor"`
-		Description string `json:"description"`
+		Model       string      `json:"model"`
+		Vendor      string      `json:"vendor"`
+		Description string      `json:"description"`
+		Exposes     []Z2MExpose `json:"exposes"`
 	} `json:"definition"`
 	Supported bool `json:"supported"`
 }
@@ -51,12 +65,14 @@ type z2mState struct {
 }
 
 type Client struct {
-	mu           sync.RWMutex
-	cfgManager   *config.Manager
-	mqttClient   mqtt.Client
-	states       map[string]*LightState // keyed by friendly_name
-	activeServer string                 // tcp://host:port
-	subscribed   map[string]bool        // tracks subscribed topics
+	mu                 sync.RWMutex
+	cfgManager         *config.Manager
+	mqttClient         mqtt.Client
+	states             map[string]*LightState // keyed by friendly_name
+	activeServer       string                 // tcp://host:port
+	subscribed         map[string]bool        // tracks subscribed topics
+	discoveredLights   []config.LightConfig   // dynamically populated
+	lastDevicesPayload []byte                 // cached last device list payload
 }
 
 func NewClient(cfgManager *config.Manager) *Client {
@@ -75,6 +91,7 @@ func (c *Client) onConfigChange(cfg *config.Config) {
 
 	c.mu.Lock()
 	isDifferentServer := newServer != c.activeServer
+	payload := c.lastDevicesPayload
 	c.mu.Unlock()
 
 	if isDifferentServer {
@@ -83,11 +100,9 @@ func (c *Client) onConfigChange(cfg *config.Config) {
 		return
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.mqttClient != nil && c.mqttClient.IsConnected() {
-		slog.Info("MQTT configuration updated, syncing light subscriptions...")
-		c.syncSubscriptions(cfg)
+	slog.Info("MQTT configuration updated, re-processing overrides...")
+	if len(payload) > 0 {
+		c.processDevices(payload)
 	}
 }
 
@@ -158,33 +173,26 @@ func (c *Client) onConnect(client mqtt.Client) {
 	slog.Info("MQTT connection established")
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	cfg := c.cfgManager.GetConfig()
 	c.subscribed = make(map[string]bool)
+	c.mu.Unlock()
 
 	// Subscribe to device announcements
 	devicesTopic := "zigbee2mqtt/bridge/devices"
 	token := client.Subscribe(devicesTopic, 0, c.handleBridgeDevices)
 	token.Wait()
+
+	c.mu.Lock()
 	c.subscribed[devicesTopic] = true
+	c.mu.Unlock()
 
-	// Subscribe to state topics for each configured light
-	for _, l := range cfg.Lights {
-		topic := fmt.Sprintf("zigbee2mqtt/%s", l.FriendlyName)
-		token := client.Subscribe(topic, 0, c.handleLightState)
-		token.Wait()
-		c.subscribed[topic] = true
-
-		if _, exists := c.states[l.FriendlyName]; !exists {
-			c.states[l.FriendlyName] = &LightState{Reachable: false}
-		}
-	}
-
-	// Request list of devices
+	// Request list of devices immediately from Zigbee2MQTT
 	getDevicesTopic := "zigbee2mqtt/bridge/config/devices/get"
 	slog.Debug("Requesting device list from Zigbee2MQTT", "topic", getDevicesTopic)
 	client.Publish(getDevicesTopic, 0, false, "")
+
+	// Also publish to secondary get devices topic for different Z2M versions
+	altGetDevicesTopic := "zigbee2mqtt/bridge/devices/get"
+	client.Publish(altGetDevicesTopic, 0, false, "")
 }
 
 func (c *Client) syncSubscriptions(cfg *config.Config) {
@@ -192,14 +200,15 @@ func (c *Client) syncSubscriptions(cfg *config.Config) {
 		return
 	}
 
+	c.mu.Lock()
 	desired := make(map[string]bool)
 	desired["zigbee2mqtt/bridge/devices"] = true
-	for _, l := range cfg.Lights {
+	for _, l := range c.discoveredLights {
 		topic := fmt.Sprintf("zigbee2mqtt/%s", l.FriendlyName)
 		desired[topic] = true
 	}
 
-	// Unsubscribe from topics no longer in config
+	// Unsubscribe from topics no longer needed
 	for topic := range c.subscribed {
 		if !desired[topic] {
 			slog.Debug("Unsubscribing from MQTT topic", "topic", topic)
@@ -225,7 +234,7 @@ func (c *Client) syncSubscriptions(cfg *config.Config) {
 
 	// Clean up states map
 	activeFriendlyNames := make(map[string]bool)
-	for _, l := range cfg.Lights {
+	for _, l := range c.discoveredLights {
 		activeFriendlyNames[l.FriendlyName] = true
 	}
 	for name := range c.states {
@@ -233,56 +242,188 @@ func (c *Client) syncSubscriptions(cfg *config.Config) {
 			delete(c.states, name)
 		}
 	}
+	c.mu.Unlock()
+}
+
+func (c *Client) GetLights() []config.LightConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	lights := make([]config.LightConfig, len(c.discoveredLights))
+	copy(lights, c.discoveredLights)
+	return lights
+}
+
+func (c *Client) SetDiscoveredLights(lights []config.LightConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.discoveredLights = lights
+}
+
+type sortedLight struct {
+	ieeeAddress  string
+	friendlyName string
+	name         string
+	capabilities string
+	model        string
+	vendor       string
+	desc         string
+	isOverride   bool
 }
 
 func (c *Client) handleBridgeDevices(client mqtt.Client, msg mqtt.Message) {
-	slog.Debug("Received bridge devices list", "topic", msg.Topic())
+	c.mu.Lock()
+	c.lastDevicesPayload = msg.Payload()
+	c.mu.Unlock()
+
+	c.processDevices(msg.Payload())
+}
+
+func detectCapabilities(exposes []Z2MExpose) string {
+	for _, exp := range exposes {
+		if exp.Type == "light" {
+			hasBrightness := false
+			hasColorTemp := false
+			hasColor := false
+
+			for _, feat := range exp.Features {
+				switch feat.Name {
+				case "brightness":
+					hasBrightness = true
+				case "color_temp":
+					hasColorTemp = true
+				case "color", "color_xy", "color_hs":
+					hasColor = true
+				}
+			}
+
+			if hasColor && hasColorTemp {
+				return "extended_color"
+			}
+			if hasColor {
+				return "color"
+			}
+			if hasColorTemp {
+				return "color_temperature"
+			}
+			if hasBrightness {
+				return "dimmable"
+			}
+			return "on_off"
+		}
+	}
+	return ""
+}
+
+func (c *Client) processDevices(payload []byte) {
 	var devices []Z2MDevice
-	if err := json.Unmarshal(msg.Payload(), &devices); err != nil {
+	if err := json.Unmarshal(payload, &devices); err != nil {
 		slog.Error("Failed to parse bridge/devices JSON", "error", err)
 		return
 	}
 
-	deviceMap := make(map[string]Z2MDevice)
-	for _, d := range devices {
-		deviceMap[d.FriendlyName] = d
+	cfg := c.cfgManager.GetConfig()
+	overrideMap := make(map[string]config.LightConfig)
+	for _, l := range cfg.Lights {
+		overrideMap[l.FriendlyName] = l
 	}
 
-	cfg := c.cfgManager.GetConfig()
-	for _, l := range cfg.Lights {
-		if d, found := deviceMap[l.FriendlyName]; found {
-			model := "Unknown"
-			vendor := "Unknown"
-			desc := "No description"
-			if d.Definition != nil {
-				if d.Definition.Model != "" {
-					model = d.Definition.Model
-				}
-				if d.Definition.Vendor != "" {
-					vendor = d.Definition.Vendor
-				}
-				if d.Definition.Description != "" {
-					desc = d.Definition.Description
-				}
-			}
-			slog.Info("Light found in Zigbee2MQTT",
-				"friendly_name", l.FriendlyName,
-				"model", model,
-				"vendor", vendor,
-				"description", desc,
-				"ieee_address", d.IEEEAddress,
-				"supported", d.Supported,
-			)
-			c.mu.Lock()
-			if state, exists := c.states[l.FriendlyName]; exists {
-				state.Reachable = true
-			}
-			c.mu.Unlock()
-		} else {
-			slog.Warn("Light NOT found in Zigbee2MQTT — check configuration",
-				"friendly_name", l.FriendlyName,
-			)
+	var sorted []sortedLight
+
+	for _, d := range devices {
+		var exposes []Z2MExpose
+		model := "Unknown"
+		vendor := "Unknown"
+		desc := "No description"
+		if d.Definition != nil {
+			exposes = d.Definition.Exposes
+			model = d.Definition.Model
+			vendor = d.Definition.Vendor
+			desc = d.Definition.Description
 		}
+
+		capType := detectCapabilities(exposes)
+		override, isOverridden := overrideMap[d.FriendlyName]
+
+		// Skip device if it's not a light, unless the user explicitly configured it
+		if capType == "" && !isOverridden {
+			continue
+		}
+
+		// Apply overrides
+		finalCap := capType
+		if isOverridden && override.Capabilities != "" {
+			finalCap = override.Capabilities
+		}
+		if finalCap == "" {
+			finalCap = "extended_color" // fallback default
+		}
+
+		finalName := d.FriendlyName
+		if isOverridden && override.Name != "" {
+			finalName = override.Name
+		}
+
+		sorted = append(sorted, sortedLight{
+			ieeeAddress:  d.IEEEAddress,
+			friendlyName: d.FriendlyName,
+			name:         finalName,
+			capabilities: finalCap,
+			model:        model,
+			vendor:       vendor,
+			desc:         desc,
+			isOverride:   isOverridden && (override.Name != "" || override.Capabilities != ""),
+		})
+	}
+
+	// Sort lights stably by IEEE Address
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].ieeeAddress < sorted[j].ieeeAddress
+	})
+
+	// Check if the list changed compared to current discoveredLights
+	c.mu.Lock()
+	changed := len(c.discoveredLights) != len(sorted)
+	if !changed {
+		for i, sl := range sorted {
+			old := c.discoveredLights[i]
+			if old.FriendlyName != sl.friendlyName || old.Capabilities != sl.capabilities || old.Name != sl.name {
+				changed = true
+				break
+			}
+		}
+	}
+	c.mu.Unlock()
+
+	// If list has changed, update discoveredLights, print logs, and sync subscriptions
+	if changed {
+		c.mu.Lock()
+		c.discoveredLights = make([]config.LightConfig, len(sorted))
+		for i, sl := range sorted {
+			c.discoveredLights[i] = config.LightConfig{
+				ID:           strconv.Itoa(i + 1),
+				FriendlyName: sl.friendlyName,
+				Capabilities: sl.capabilities,
+				Name:         sl.name,
+			}
+			if state, exists := c.states[sl.friendlyName]; exists {
+				state.Reachable = true
+			} else {
+				c.states[sl.friendlyName] = &LightState{Reachable: true}
+			}
+		}
+		c.mu.Unlock()
+
+		slog.Info("Discovered Zigbee2MQTT lights", "total", len(sorted))
+		for i, sl := range sorted {
+			source := "auto"
+			if sl.isOverride {
+				source = "override"
+			}
+			slog.Info(fmt.Sprintf("  [Light %d] IEEE: %s | Z2M: '%s' | Name: '%s' | Type: %s (%s)",
+				i+1, sl.ieeeAddress, sl.friendlyName, sl.name, sl.capabilities, source))
+		}
+
+		c.syncSubscriptions(cfg)
 	}
 }
 
