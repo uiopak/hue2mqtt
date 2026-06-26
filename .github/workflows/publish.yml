@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - master
-      - main
     tags:
       - 'v*'
 
@@ -49,7 +48,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ meta.outputs.tags }}
-          labels: ${{ meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
