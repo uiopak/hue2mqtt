@@ -31,7 +31,10 @@ func NewDiscoveryManager(cfgManager *config.Manager) *DiscoveryManager {
 func (d *DiscoveryManager) Start() error {
 	cfg := d.cfgManager.GetConfig()
 	bridgeID := d.cfgManager.BridgeID()
-	localIP := GetLocalIP()
+	localIP := cfg.Bridge.IP
+	if localIP == "" {
+		localIP = GetLocalIP()
+	}
 
 	// Bind UDP port 1900 on all interfaces
 	addr := &net.UDPAddr{IP: net.IPv4zero, Port: 1900}
@@ -83,13 +86,20 @@ func (d *DiscoveryManager) Start() error {
 		fmt.Sprintf("bridgeid=%s", bridgeID),
 	}
 
+	var ips []net.IP
+	if cfg.Bridge.IP != "" {
+		if parsed := net.ParseIP(cfg.Bridge.IP); parsed != nil {
+			ips = []net.IP{parsed}
+		}
+	}
+
 	service, err := mdns.NewMDNSService(
 		name,
 		serviceType,
 		domain,
 		"",
 		cfg.Bridge.HTTPPort,
-		nil, // Nil will auto-discover LAN IPs
+		ips,
 		txtRecords,
 	)
 	if err != nil {
@@ -119,7 +129,7 @@ func (d *DiscoveryManager) Start() error {
 		d.broadcastSSDPNotify(localIP, cfg.Bridge.HTTPPort, bridgeID, cfg.Bridge.MAC)
 	}()
 
-	slog.Info("mDNS: Advertising service", "name", name, "type", serviceType, "port", cfg.Bridge.HTTPPort)
+	slog.Info("mDNS: Advertising service", "name", name, "type", serviceType, "port", cfg.Bridge.HTTPPort, "ip", localIP)
 	return nil
 }
 
@@ -144,6 +154,29 @@ func (d *DiscoveryManager) Stop() {
 }
 
 func GetLocalIP() string {
+	interfaces, err := net.Interfaces()
+	if err == nil {
+		for _, iface := range interfaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+					if ip4 := ipnet.IP.To4(); ip4 != nil {
+						ipStr := ip4.String()
+						if !strings.HasPrefix(ipStr, "10.88.") && !strings.HasPrefix(ipStr, "172.17.") && !strings.HasPrefix(ipStr, "127.") {
+							return ipStr
+						}
+					}
+				}
+			}
+		}
+	}
+
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
 		return "127.0.0.1" // Fallback
@@ -175,9 +208,18 @@ func (d *DiscoveryManager) runSSDP(bridgeIP string, port int, bridgeID string, m
 			}
 
 			request := string(buf[:n])
-			if strings.Contains(request, "M-SEARCH") && (strings.Contains(request, "ssdp:discover") || strings.Contains(request, "upnp:rootdevice") || strings.Contains(request, "InternetGatewayDevice")) {
-				slog.Debug("SSDP: Received M-SEARCH request", "from", srcAddr.String())
-				go sendSSDPResponse(srcAddr, bridgeIP, port, bridgeID, mac)
+			reqLower := strings.ToLower(request)
+			if strings.Contains(reqLower, "m-search") {
+				slog.Debug("SSDP: Received M-SEARCH request", "from", srcAddr.String(), "raw", request)
+				if strings.Contains(reqLower, "ssdp:discover") ||
+					strings.Contains(reqLower, "upnp:rootdevice") ||
+					strings.Contains(reqLower, "ssdp:all") ||
+					strings.Contains(reqLower, "basic:1") ||
+					strings.Contains(reqLower, "device:basic") ||
+					strings.Contains(reqLower, "hue") ||
+					strings.Contains(reqLower, "internetgatewaydevice") {
+					go sendSSDPResponse(srcAddr, bridgeIP, port, bridgeID, mac)
+				}
 			}
 		}
 	}

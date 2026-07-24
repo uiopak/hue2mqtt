@@ -21,6 +21,7 @@ type Config struct {
 type BridgeConfig struct {
 	Name       string `yaml:"name"`
 	MAC        string `yaml:"mac"`
+	IP         string `yaml:"ip,omitempty"`
 	HTTPPort   int    `yaml:"http_port"`
 	LinkButton bool   `yaml:"link_button"`
 	LogLevel   string `yaml:"log_level"`

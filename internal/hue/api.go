@@ -179,9 +179,17 @@ func (s *Server) Stop() {
 	}
 }
 
+func (s *Server) getIP() string {
+	cfg := s.cfgManager.GetConfig()
+	if cfg.Bridge.IP != "" {
+		return cfg.Bridge.IP
+	}
+	return GetLocalIP()
+}
+
 func (s *Server) handleDescription(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgManager.GetConfig()
-	localIP := GetLocalIP()
+	localIP := s.getIP()
 	macLower := strings.ToLower(cfg.Bridge.MAC)
 
 	w.Header().Set("Content-Type", "application/xml")
@@ -207,7 +215,7 @@ func (s *Server) handleDescription(w http.ResponseWriter, r *http.Request) {
 func (s *Server) buildHueConfig(whitelist map[string]HueWhitelist) HueConfig {
 	cfg := s.cfgManager.GetConfig()
 	bridgeID := s.cfgManager.BridgeID()
-	localIP := GetLocalIP()
+	localIP := s.getIP()
 	gateway := ""
 	parts := strings.Split(localIP, ".")
 	if len(parts) == 4 {
