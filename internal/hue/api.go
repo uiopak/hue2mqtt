@@ -475,7 +475,7 @@ func (s *Server) handleLightStatePut(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) bool {
 	username := r.PathValue("username")
-	if username == "" {
+	if username == "" || username == "null" {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"error": {"type": 1, "address": "/", "description": "unauthorized user"}}]`))
 		return false

@@ -1,11 +1,13 @@
 package hue
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/mdns"
@@ -36,40 +38,41 @@ func (d *DiscoveryManager) Start() error {
 		localIP = GetLocalIP()
 	}
 
-	// Bind UDP port 1900 on all interfaces
-	addr := &net.UDPAddr{IP: net.IPv4zero, Port: 1900}
-	conn, err := net.ListenUDP("udp4", addr)
+	// Bind UDP port 1900 on all interfaces with SO_REUSEADDR
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				_ = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+			})
+		},
+	}
+	pConnRaw, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:1900")
 	if err != nil {
-		return fmt.Errorf("SSDP: failed to listen on UDP port 1900: %w", err)
-	}
-	d.ssdpConn = conn
+		slog.Error("SSDP: failed to listen on UDP port 1900 (continuing with mDNS)", "error", err)
+	} else if conn, ok := pConnRaw.(*net.UDPConn); ok {
+		d.ssdpConn = conn
+		// Join the multicast group on all multicast-capable interfaces
+		pConn := ipv4.NewPacketConn(conn)
+		group := net.IPv4(239, 255, 255, 250)
 
-	// Join the multicast group on all multicast-capable interfaces
-	pConn := ipv4.NewPacketConn(conn)
-	group := net.IPv4(239, 255, 255, 250)
-
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		_ = d.ssdpConn.Close()
-		return fmt.Errorf("SSDP: failed to list network interfaces: %w", err)
-	}
-
-	joinedAny := false
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagUp == 0 {
-			continue
+		interfaces, err := net.Interfaces()
+		if err == nil {
+			joinedAny := false
+			for _, iface := range interfaces {
+				if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagMulticast == 0 {
+					continue
+				}
+				if err := pConn.JoinGroup(&iface, &net.UDPAddr{IP: group}); err != nil {
+					slog.Debug("SSDP: Failed to join multicast group on interface", "name", iface.Name, "error", err)
+				} else {
+					slog.Info("SSDP: Joined multicast group on interface", "name", iface.Name)
+					joinedAny = true
+				}
+			}
+			if !joinedAny {
+				slog.Warn("SSDP: Could not join multicast group on any interface")
+			}
 		}
-		err := pConn.JoinGroup(&iface, &net.UDPAddr{IP: group})
-		if err != nil {
-			slog.Debug("SSDP: Failed to join multicast group on interface", "name", iface.Name, "error", err)
-		} else {
-			slog.Info("SSDP: Joined multicast group on interface", "name", iface.Name)
-			joinedAny = true
-		}
-	}
-
-	if !joinedAny {
-		slog.Warn("SSDP: Could not join multicast group on any interface. Discovery might not work.")
 	}
 
 	// Create mDNS service synchronously
