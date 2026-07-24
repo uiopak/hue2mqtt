@@ -256,12 +256,24 @@ func (s *Server) handleConfigPublic(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+type registerRequest struct {
+	DeviceType        string `json:"devicetype"`
+	GenerateClientKey bool   `json:"generateclientkey"`
+}
+
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgManager.GetConfig()
 	w.Header().Set("Content-Type", "application/json")
 	if cfg.Bridge.LinkButton {
 		slog.Info("Pairing request accepted (link button is enabled)")
-		_, _ = w.Write([]byte(`[{"success": {"username": "hue2mqtt-user"}}]`))
+		var req registerRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		if req.GenerateClientKey {
+			_, _ = w.Write([]byte(`[{"success": {"username": "hue2mqtt-user", "clientkey": "321C0C2EBFA7361E55491095B2F5F9DB"}}]`))
+		} else {
+			_, _ = w.Write([]byte(`[{"success": {"username": "hue2mqtt-user"}}]`))
+		}
 	} else {
 		slog.Info("Pairing request rejected (link button is disabled)")
 		_, _ = w.Write([]byte(`[{"error": {"type": 101, "address": "", "description": "link button not pressed"}}]`))
