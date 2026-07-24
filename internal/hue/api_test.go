@@ -146,7 +146,7 @@ lights:
 		t.Errorf("GET /description.xml returned status %d", rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "<friendlyName>test-bridge (") {
+	if !strings.Contains(body, "<friendlyName>Philips hue (") {
 		t.Errorf("XML response doesn't contain friendly name: %s", body)
 	}
 

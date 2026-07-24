@@ -56,6 +56,8 @@ func (s *Server) Start() error {
 
 	// Register API endpoints
 	mux.HandleFunc("GET /description.xml", s.handleDescription)
+	mux.HandleFunc("GET /api", s.handleConfigPublic)
+	mux.HandleFunc("GET /api/", s.handleConfigPublic)
 	mux.HandleFunc("GET /api/config", s.handleConfigPublic)
 	mux.HandleFunc("POST /api", s.handleRegister)
 	mux.HandleFunc("GET /api/{username}", s.handleFullState)
@@ -191,6 +193,8 @@ func (s *Server) handleDescription(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgManager.GetConfig()
 	localIP := s.getIP()
 	macLower := strings.ToLower(cfg.Bridge.MAC)
+	cleanMAC := strings.ReplaceAll(macLower, ":", "")
+	cleanMAC = strings.ReplaceAll(cleanMAC, "-", "")
 
 	w.Header().Set("Content-Type", "application/xml")
 	_, _ = fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8" ?>
@@ -199,9 +203,9 @@ func (s *Server) handleDescription(w http.ResponseWriter, r *http.Request) {
   <URLBase>http://%s:%d/</URLBase>
   <device>
     <deviceType>urn:schemas-upnp-org:device:Basic:1</deviceType>
-    <friendlyName>%s (%s)</friendlyName>
-    <manufacturer>Signify</manufacturer>
-    <manufacturerURL>http://www.meethue.com</manufacturerURL>
+    <friendlyName>Philips hue (%s)</friendlyName>
+    <manufacturer>Royal Philips Electronics</manufacturer>
+    <manufacturerURL>http://www.philips.com</manufacturerURL>
     <modelDescription>Philips hue Personal Wireless Lighting</modelDescription>
     <modelName>Philips hue bridge 2015</modelName>
     <modelNumber>BSB002</modelNumber>
@@ -209,7 +213,7 @@ func (s *Server) handleDescription(w http.ResponseWriter, r *http.Request) {
     <serialNumber>%s</serialNumber>
     <UDN>uuid:2f402f80-da50-11e1-9b23-%s</UDN>
   </device>
-</root>`, localIP, cfg.Bridge.HTTPPort, cfg.Bridge.Name, localIP, macLower, macLower)
+</root>`, localIP, cfg.Bridge.HTTPPort, localIP, cleanMAC, cleanMAC)
 }
 
 func (s *Server) buildHueConfig(whitelist map[string]HueWhitelist) HueConfig {
@@ -463,7 +467,7 @@ func (s *Server) handleLightStatePut(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) bool {
 	username := r.PathValue("username")
-	if username != "hue2mqtt-user" {
+	if username == "" {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"error": {"type": 1, "address": "/", "description": "unauthorized user"}}]`))
 		return false
