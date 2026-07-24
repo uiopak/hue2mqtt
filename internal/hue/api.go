@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -87,13 +88,20 @@ func (s *Server) Start() error {
 		// Set cleaned path for routing and dumping
 		r.URL.Path = cleanedPath
 
-		// Capture raw request dump
-		reqDump, err := httputil.DumpRequest(r, true)
+		// Capture raw request dump without draining r.Body for downstream handlers
 		var reqDumpStr string
-		if err == nil {
-			reqDumpStr = string(reqDump)
-		} else {
-			reqDumpStr = fmt.Sprintf("Failed to dump request: %v", err)
+		if r.Body != nil {
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err == nil {
+				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+				reqDump, err := httputil.DumpRequest(r, true)
+				if err == nil {
+					reqDumpStr = string(reqDump)
+				}
+				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			} else {
+				reqDumpStr = fmt.Sprintf("Failed to read body: %v", err)
+			}
 		}
 
 		ww := &responseWriterWithStatus{ResponseWriter: w}
